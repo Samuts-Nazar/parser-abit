@@ -21,3 +21,27 @@ class DirectionStats:
     k: int  # контрактних місць
     zayav: int  # кількість заяв
     competition: Optional[float]  # конкурс на бюджет
+
+
+@dataclass
+class Seats:
+    vm: Optional[int]
+    bm_max: Optional[int]
+    bm_min: Optional[int]  # присутнє не для кожного напряму
+    k: Optional[int]
+
+
+@dataclass
+class SearchApplication:
+    """Один рядок з відповіді пошуку /api/statements/ — одна заява людини."""
+
+    direction_id: int
+    position: int  # сира позиція (бюджет+контракт разом)
+    priority: int
+    funding: str  # "Б" or "К"
+    score: float
+    status: str
+    university: str
+    specialty: str
+    seats: Seats
+    quota: Optional[str] = None

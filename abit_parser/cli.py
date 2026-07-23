@@ -1,9 +1,12 @@
 import argparse
 import sys
+from typing import Optional
 
 from . import config
+from .contract_analysis import ContractResult
 from .cross_analysis import CrossCheckResult
-from .engine import AnalysisError, AnalysisResult, run_analysis
+from .engine import AnalysisError, AnalysisResult, run_analysis, run_contract_chance
+from .format_text import chance_line, rank_strip
 from .models import DirectionStats
 from .output import write_json, write_md
 from .summarize import PROVIDER_ANTHROPIC, SummarizeError, build_depersonalized_payload, generate_summary
@@ -53,16 +56,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--explain", action="store_true", help="Переказати результат людською мовою через Anthropic API"
     )
+    parser.add_argument(
+        "--contract",
+        action="store_true",
+        help="Порахувати шанс на контракт (v4) — окремі мережеві запити, не автоматично",
+    )
     return parser
 
 
 def format_report(
     stats: DirectionStats, result: VerdictResult, user_score: float, user_priority: int, user_funding: str
 ) -> str:
+    def _fmt(v: object) -> str:
+        return "—" if v is None else str(v)
+
     lines = []
     lines.append(f"Напрям: {stats.title}")
     comp = f"  Конкурс на бюджет={stats.competition}" if stats.competition is not None else ""
-    lines.append(f"ВМ={stats.vm}  БМmax={stats.bm_max}  К={stats.k}  Заяв={stats.zayav}{comp}")
+    lines.append(
+        f"ВМ={_fmt(stats.vm)}  БМmax={stats.bm_max}  К={_fmt(stats.k)}  Заяв={_fmt(stats.zayav)}{comp}"
+    )
+    if stats.k is None:
+        lines.append("(контрактних місць у шапці не вказано — контрактна фіча вимкнена для цього напряму)")
     lines.append(f"Ваші дані: бал={user_score}  пріоритет={user_priority}  {user_funding}")
     lines.append("")
     lines.append(f"Оптимістична межа місця: {result.optimistic_bound}  (лише залізні конкуренти)")
@@ -91,11 +106,10 @@ def format_cross_check_report(cc: CrossCheckResult) -> str:
         f"лишаються: {cc.stays_count}  ймовірно підуть: {cc.likely_count}  "
         f"точно підуть: {cc.definite_count}  невизначено: {cc.unknown_count}"
     )
-    lines.append(
-        f"Оптимістична межа: {cc.optimistic_bound}  Очікувана: {cc.expected_count:.1f}  "
-        f"Песимістична: {cc.pessimistic_bound}  (M={cc.m})"
-    )
-    lines.append(f"Оцінка шансу проходження: {cc.chance * 100:.0f}%  (евристика, не строга ймовірність)")
+    lines.append("")
+    lines.append(rank_strip(cc.optimistic_bound, cc.expected_count, cc.pessimistic_bound, cc.m))
+    lines.append(f"ВЕРДИКТ: {cc.verdict.upper()}")
+    lines.append(chance_line(cc.chance, cc.pessimistic_chance, cc.optimistic_chance))
     lines.append("")
     lines.append("Деталі по групі ризику:")
     for a in cc.assessments:
@@ -112,8 +126,43 @@ def format_cross_check_report(cc: CrossCheckResult) -> str:
     return "\n".join(lines)
 
 
+def format_contract_report(cr: ContractResult) -> str:
+    lines = []
+    lines.append("")
+    lines.append("=== Шанс на контракт (v4) ===")
+    lines.append(f"K (контрактних місць): {cr.k}   Розмір контрактного пулу (усі бали): {cr.pool_size_total}")
+    lines.append(
+        f"Тверді конкуренти (пріоритет 1): {cr.hard_count}  |  "
+        f"лишаються: {cr.stays_count}  ймовірно підуть: {cr.likely_count}  "
+        f"точно підуть: {cr.definite_count}  невизначено: {cr.unknown_count}"
+    )
+    lines.append("")
+    lines.append(rank_strip(cr.optimistic_bound, cr.expected_count, cr.pessimistic_bound, cr.k))
+    lines.append(f"ВЕРДИКТ (контракт): {cr.verdict.upper()}")
+    lines.append(chance_line(cr.chance, cr.pessimistic_chance, cr.optimistic_chance))
+    if cr.assessments:
+        lines.append("")
+        lines.append("Деталі по контрактному пулу вище вашого балу:")
+        for a in cr.assessments:
+            applicant = a.member.applicant
+            choice_note = ""
+            if a.best_choice:
+                bc = a.best_choice
+                choice_note = (
+                    f" -> вищий пріоритет: {bc.university} / {bc.specialty} поз.{bc.position} "
+                    f"(БМmax={bc.seats.bm_max}, БМmin={bc.seats.bm_min}, К={bc.seats.k})"
+                )
+            note = f"  ({a.note})" if a.note else ""
+            lines.append(f"  {applicant.name:<25} [{a.member.origin}/{a.status}]{choice_note}{note}")
+    return "\n".join(lines)
+
+
 def _console_progress(done: int, total: int, name: str) -> None:
     print(f"  крос-аналіз {done}/{total}: {name}...")
+
+
+def _console_contract_progress(done: int, total: int, name: str) -> None:
+    print(f"  контракт {done}/{total}: {name}...")
 
 
 def main(argv=None) -> int:
@@ -148,8 +197,21 @@ def main(argv=None) -> int:
     if result.cross_check is not None:
         print(format_cross_check_report(result.cross_check))
 
+    contract_result: Optional[ContractResult] = None
+    if args.contract:
+        try:
+            contract_result = run_contract_chance(
+                result,
+                p_likely=args.p_likely,
+                use_cache=args.use_cache,
+                on_progress=_console_contract_progress,
+            )
+            print(format_contract_report(contract_result))
+        except AnalysisError as e:
+            print(f"\n{e}")
+
     if args.explain:
-        payload = build_depersonalized_payload(result)
+        payload = build_depersonalized_payload(result, contract_result)
         try:
             explanation = generate_summary(payload, provider=PROVIDER_ANTHROPIC)
             print("\n=== Пояснення (LLM) ===")
@@ -158,11 +220,13 @@ def main(argv=None) -> int:
             print(f"\n{e}")
 
     if args.json:
-        write_json(args.json, result.stats, result.verdict, result.cross_check)
+        write_json(args.json, result.stats, result.verdict, result.cross_check, contract_result)
     if args.md:
         md_text = report
         if result.cross_check is not None:
             md_text += format_cross_check_report(result.cross_check)
+        if contract_result is not None:
+            md_text += format_contract_report(contract_result)
         write_md(args.md, md_text)
 
     return 0

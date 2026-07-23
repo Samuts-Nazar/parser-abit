@@ -6,11 +6,15 @@ from bs4 import BeautifulSoup
 from .models import Applicant, DirectionStats
 
 PRIORITY_RE = re.compile(r"(\d+)\s*\((Б|К)\)")
-VM_RE = re.compile(r"ВМ\s+(\d+)")
-BM_MAX_RE = re.compile(r"БМ\s+max\s+(\d+)", re.IGNORECASE)
-K_RE = re.compile(r"К\s+(\d+)\s+Заяв")
-ZAYAV_RE = re.compile(r"Заяв\s+(\d+)")
-COMPETITION_RE = re.compile(r"Конкурс на бюджет\s+([\d.]+)")
+VM_RE = re.compile(r"ВМ\s*(\d+)")
+BM_MAX_RE = re.compile(r"БМ\s*max\s*(\d+)", re.IGNORECASE)
+# Шапка нестабільна між ВНЗ/спеціальностями: К може бути відсутній, а кирилична
+# К (U+041A) і латинська K (U+004B) виглядають однаково, але це різні символи —
+# тому шукаємо обидва. Матчимо лише як окремий токен (з обох боків межа рядка/
+# роздільника/пробілу), інакше "Конкурс" теж почався б з "К" і давав хибний збіг.
+K_RE = re.compile(r"(?:^|[•\s])[КK]\s*(\d+)(?:$|[•\s])")
+ZAYAV_RE = re.compile(r"Заяв\s*(\d+)")
+COMPETITION_RE = re.compile(r"Конкурс на бюджет\s*([\d.]+)")
 
 
 def parse_stats(soup: BeautifulSoup) -> DirectionStats:
@@ -30,16 +34,25 @@ def parse_stats(soup: BeautifulSoup) -> DirectionStats:
     if stats_text is None:
         raise ValueError("Не знайдено блок статистики (ВМ/БМmax/К) у шапці сторінки.")
 
-    def find_int(pattern: re.Pattern, label: str) -> int:
-        m = pattern.search(stats_text)
-        if not m:
-            raise ValueError(f"Не вдалося витягти '{label}' з шапки: {stats_text!r}")
-        return int(m.group(1))
+    # Нерозривні пробіли (\xa0) та подвійні пробіли ламають регекси без \s*-меж —
+    # нормалізуємо один раз, до всіх подальших пошуків.
+    stats_text = re.sub(r"\s+", " ", stats_text.replace("\xa0", " ")).strip()
 
-    vm = find_int(VM_RE, "ВМ")
-    bm_max = find_int(BM_MAX_RE, "БМmax")
-    k = find_int(K_RE, "К")
-    zayav = find_int(ZAYAV_RE, "Заяв")
+    def find_int(pattern: re.Pattern) -> "int | None":
+        m = pattern.search(stats_text)
+        return int(m.group(1)) if m else None
+
+    vm = find_int(VM_RE)
+    bm_max = find_int(BM_MAX_RE)
+    if bm_max is None:
+        raise ValueError(f"Не вдалося витягти 'БМmax' з шапки — без нього вердикт неможливий: {stats_text!r}")
+
+    k = find_int(K_RE)
+    # Дехто з ВНЗ шапку з К просто не показує — деривуємо з ВМ/БМmax, якщо можна.
+    if k is None and vm is not None and vm > bm_max:
+        k = vm - bm_max
+
+    zayav = find_int(ZAYAV_RE)
 
     comp_match = COMPETITION_RE.search(stats_text)
     competition = float(comp_match.group(1)) if comp_match else None

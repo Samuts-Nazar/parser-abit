@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional
 
 from .config import P_LIKELY_DEFAULT
+from .estimate import estimate
 from .models import SearchApplication, Seats
 from .search import search_applicant
 from .verdict import Competitor, VerdictResult
@@ -34,7 +35,10 @@ class CrossCheckResult:
     optimistic_bound: int
     expected_count: float
     pessimistic_bound: int
-    chance: float
+    chance: float  # "очікуваний" % — евристика, центрована на M (див. estimate.py)
+    pessimistic_chance: float  # 0 або 1 — проходить навіть найгірший сценарій?
+    optimistic_chance: float  # 0 або 1 — проходить бодай найкращий сценарій?
+    verdict: str  # проходиш | на межі (радше проходиш/пролітаєш) | пролітаєш
     m: int
 
 
@@ -151,13 +155,7 @@ def run_cross_check(
     pessimistic_bound = hard_count + stays_count + likely_count + unknown_count
     expected_count = hard_count + expected_stay
 
-    if pessimistic_bound <= m:
-        chance = 1.0
-    elif optimistic_bound > m:
-        chance = 0.0
-    else:
-        chance = (pessimistic_bound - expected_count) / (pessimistic_bound - optimistic_bound)
-        chance = max(0.0, min(1.0, chance))
+    est = estimate(optimistic_bound, expected_count, pessimistic_bound, m)
 
     return CrossCheckResult(
         hard_count=hard_count,
@@ -169,6 +167,9 @@ def run_cross_check(
         optimistic_bound=optimistic_bound,
         expected_count=expected_count,
         pessimistic_bound=pessimistic_bound,
-        chance=chance,
+        chance=est.chance,
+        pessimistic_chance=est.pessimistic_chance,
+        optimistic_chance=est.optimistic_chance,
+        verdict=est.verdict,
         m=m,
     )

@@ -16,11 +16,11 @@ class Applicant:
 @dataclass
 class DirectionStats:
     title: str
-    vm: int  # всього місць
-    bm_max: int  # M — максимум бюджетних місць
-    k: int  # контрактних місць
-    zayav: int  # кількість заяв
-    competition: Optional[float]  # конкурс на бюджет
+    bm_max: int  # M — максимум бюджетних місць. Єдине поле, без якого падаємо.
+    vm: Optional[int] = None  # всього місць
+    k: Optional[int] = None  # контрактних місць — шапка не завжди його показує
+    zayav: Optional[int] = None  # кількість заяв
+    competition: Optional[float] = None  # конкурс на бюджет
 
 
 @dataclass

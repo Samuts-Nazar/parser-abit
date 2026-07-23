@@ -1,6 +1,7 @@
 import json
 from typing import Optional
 
+from .contract_analysis import ContractResult
 from .engine import AnalysisResult
 
 PROVIDER_GEMINI = "gemini"
@@ -10,13 +11,14 @@ PROVIDER_OFFLINE = "offline"
 DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"
 
-SYSTEM_PROMPT = """Ти переказуєш готовий детермінований аналіз конкурсу на вступ людською мовою, українською, 3-6 речень. Ти НІЧОГО не вирішуєш і не рахуєш — усі числа вже обчислені, твоя робота лише пояснити їх зрозуміло людині, яка не розбирається в термінах вступної кампанії.
+SYSTEM_PROMPT = """Ти переказуєш готовий детермінований аналіз конкурсу на вступ людською мовою, українською, 3-6 речень. Ти НІЧОГО не вирішуєш і не рахуєш — усі числа й вердикт вже обчислені, твоя робота лише пояснити їх зрозуміло людині, яка не розбирається в термінах вступної кампанії.
 
 КРИТИЧНО — чесність на межі:
-- Якщо "expected_count" (очікувана кількість конкурентів) в cross_check_v2 більша або дорівнює "m" — НЕ кажи "ти проходиш" впевнено. Формулюй як "ти прямо на межі, результат залежить від того, скільки людей з групи ризику реально підуть на вищий пріоритет".
-- Загальне правило: твій підсумок ніколи не звучить впевненіше, ніж дозволяє розрив між очікуваною/песимістичною межами і M. Чим ближчі ці межі до M — тим обережніше формулювання.
+- У кожного блоку (cross_check_v2, contract_v4) вже є готове поле "verdict" — воно точно враховує і песимістичний, і очікуваний сценарій. ЗАВЖДИ бери формулювання звідти, НЕ вигадуй власне "проходиш"/"пройдеш" на основі самих чисел — легко переоцінити шанс, дивлячись лише на "chance".
+- Якщо verdict містить "на межі" — це і є правильна відповідь, навіть якщо "chance" виглядає високим. Ніколи не пом'якшуй "на межі (радше пролітаєш)" до просто "на межі" чи тим паче "проходиш".
+- Головні числа — це РАНГИ (optimistic_bound / expected_count / pessimistic_bound проти m або k), а не відсотки. Веди відповідь саме ними: "у найгіршому випадку Х-й, очікувано Y-й, у найкращому Z-й — місць N". Відсотки (chance, pessimistic_chance, optimistic_chance) — це вторинна, менш надійна оцінка; якщо згадуєш їх, веди з pessimistic_chance, не з optimistic_chance чи навіть chance.
 - Для людей зі статусом "лишається" НЕ вигадуй, куди саме вона в підсумку потрапить — кажи лише "залишається реальним конкурентом тут".
-- "chance" (оцінка шансу) — евристика, не строга ймовірність. Не подавай її як точний прогноз чи гарантію.
+- Якщо в payload є "contract_v4" — додай про це окремий короткий абзац після бюджетного висновку, тим самим принципом (спирайся на його "verdict", не вигадуй свій).
 """
 
 
@@ -24,7 +26,9 @@ class SummarizeError(Exception):
     """Сумаризація не вдалась (немає пакета/ключа, мережева помилка тощо)."""
 
 
-def build_depersonalized_payload(result: AnalysisResult) -> dict:
+def build_depersonalized_payload(
+    result: AnalysisResult, contract_result: Optional[ContractResult] = None
+) -> dict:
     """Знеособлена структура для LLM: без ПІБ, лише бал/пріоритет/статус/куди метить."""
     payload = {
         "direction": result.stats.title,
@@ -36,6 +40,7 @@ def build_depersonalized_payload(result: AnalysisResult) -> dict:
     cc = result.cross_check
     if cc is not None:
         payload["cross_check_v2"] = {
+            "m": cc.m,
             "hard_count": cc.hard_count,
             "stays_count": cc.stays_count,
             "likely_count": cc.likely_count,
@@ -45,6 +50,9 @@ def build_depersonalized_payload(result: AnalysisResult) -> dict:
             "expected_count": cc.expected_count,
             "pessimistic_bound": cc.pessimistic_bound,
             "chance": cc.chance,
+            "pessimistic_chance": cc.pessimistic_chance,
+            "optimistic_chance": cc.optimistic_chance,
+            "verdict": cc.verdict,
             "risk_group": [
                 {
                     "score": a.competitor.applicant.score,
@@ -57,41 +65,65 @@ def build_depersonalized_payload(result: AnalysisResult) -> dict:
                 for a in cc.assessments
             ],
         }
+    if contract_result is not None:
+        cr = contract_result
+        payload["contract_v4"] = {
+            "k": cr.k,
+            "pool_size_total": cr.pool_size_total,
+            "hard_count": cr.hard_count,
+            "stays_count": cr.stays_count,
+            "likely_count": cr.likely_count,
+            "definite_count": cr.definite_count,
+            "unknown_count": cr.unknown_count,
+            "optimistic_bound": cr.optimistic_bound,
+            "expected_count": cr.expected_count,
+            "pessimistic_bound": cr.pessimistic_bound,
+            "chance": cr.chance,
+            "pessimistic_chance": cr.pessimistic_chance,
+            "optimistic_chance": cr.optimistic_chance,
+            "verdict": cr.verdict,
+            "pool_above_user": [
+                {
+                    "score": a.member.applicant.score,
+                    "origin": a.member.origin,
+                    "status": a.status,
+                    "targets_instead": (
+                        f"{a.best_choice.university} / {a.best_choice.specialty}" if a.best_choice else None
+                    ),
+                }
+                for a in cr.assessments
+            ],
+        }
     return payload
 
 
+def _bound_sentence(label: str, block: dict, limit_key: str) -> str:
+    limit = block[limit_key]
+    opt = block["optimistic_bound"]
+    expected = block["expected_count"]
+    pess = block["pessimistic_bound"]
+    return (
+        f"{label}: у найгіршому випадку {pess}-й, очікувано {round(expected)}-й, "
+        f"у найкращому {opt}-й — місць {limit}. Вердикт: {block['verdict']} "
+        f"(шанс: песимістичний {block['pessimistic_chance'] * 100:.0f}%, "
+        f"очікуваний {block['chance'] * 100:.0f}%, оптимістичний {block['optimistic_chance'] * 100:.0f}% — евристика)."
+    )
+
+
 def _summarize_offline(payload: dict) -> str:
-    m = payload["m"]
-    lines = [f"Вердикт v1: {payload['verdict_v1']}. Бюджетних місць (M) = {m}."]
+    lines = [f"Вердикт v1 (широка вилка): {payload['verdict_v1']}. Бюджетних місць (M) = {payload['m']}."]
 
     cc = payload.get("cross_check_v2")
-    if cc is None:
-        return " ".join(lines)
+    if cc is not None:
+        lines.append(_bound_sentence("Бюджет (уточнено v2)", cc, "m"))
+        if cc["stays_count"]:
+            lines.append(f"{cc['stays_count']} людей з групи ризику лишаються реальними конкурентами тут.")
+        if cc["unknown_count"]:
+            lines.append(f"{cc['unknown_count']} осіб не вдалось однозначно визначити.")
 
-    expected = cc["expected_count"]
-    opt = cc["optimistic_bound"]
-    pess = cc["pessimistic_bound"]
-
-    if pess <= m:
-        lines.append(f"Навіть у найгіршому сценарії конкурентів ({pess}) менше за M ({m}) — проходиш.")
-    elif opt > m:
-        lines.append(f"Навіть у найкращому сценарії конкурентів ({opt}) більше за M ({m}) — не проходиш.")
-    elif expected >= m:
-        lines.append(
-            f"Очікувана кількість конкурентів ({expected:.1f}) вже на рівні або вище M ({m}) — "
-            "ти прямо на межі, результат залежить від того, скільки людей з групи ризику реально підуть "
-            "на вищий пріоритет."
-        )
-    else:
-        lines.append(
-            f"Очікувана кількість конкурентів ({expected:.1f}) нижче M ({m}), але межі широкі "
-            f"({opt}–{pess}) — оцінка шансу {cc['chance'] * 100:.0f}% (евристика, не гарантія)."
-        )
-
-    if cc["stays_count"]:
-        lines.append(f"{cc['stays_count']} людей з групи ризику лишаються реальними конкурентами тут.")
-    if cc["unknown_count"]:
-        lines.append(f"{cc['unknown_count']} осіб не вдалось однозначно визначити.")
+    cr = payload.get("contract_v4")
+    if cr is not None:
+        lines.append(_bound_sentence("Контракт (v4)", cr, "k"))
 
     return " ".join(lines)
 

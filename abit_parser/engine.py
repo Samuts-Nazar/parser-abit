@@ -6,6 +6,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from .config import P_LIKELY_DEFAULT
+from .contract_analysis import ContractResult, build_contract_pool, run_contract_analysis
 from .cross_analysis import CrossCheckResult, run_cross_check
 from .models import Applicant, DirectionStats
 from .parse import parse_applicants, parse_stats
@@ -30,6 +31,9 @@ class AnalysisResult:
     applicants: List[Applicant]
     budget_count: int
     verdict: VerdictResult
+    score: float
+    priority: int
+    funding: str
     cross_check: Optional[CrossCheckResult] = None
     warnings: List[str] = field(default_factory=list)
 
@@ -108,6 +112,51 @@ def run_analysis(
         applicants=applicants,
         budget_count=len(budget),
         verdict=verdict,
+        score=score,
+        priority=priority,
+        funding=funding,
         cross_check=cross_result,
         warnings=warnings,
+    )
+
+
+def run_contract_chance(
+    result: AnalysisResult,
+    p_likely: float = P_LIKELY_DEFAULT,
+    use_cache: bool = True,
+    on_progress: Optional[ProgressCallback] = None,
+) -> ContractResult:
+    """Шанс на контракт (v4) — рахувати лише на вимогу, ПІСЛЯ run_analysis."""
+    if result.stats.k is None:
+        raise AnalysisError("У шапці напряму не вказано К (контрактних місць) — контрактний розрахунок недоступний.")
+
+    dir_match = DIRECTION_ID_RE.search(result.url)
+    year_match = YEAR_RE.search(result.url)
+    if not dir_match or not year_match:
+        raise AnalysisError(
+            "Не вдалось витягти direction_id/рік з URL — контрактний розрахунок недоступний."
+        )
+    direction_id = int(dir_match.group(1))
+    year = int(year_match.group(1))
+
+    pool = build_contract_pool(result.applicants, result.stats.bm_max)
+    above_user = [m for m in pool if m.applicant.score > result.score]
+    total = sum(1 for m in above_user if m.applicant.priority != 1)
+    done = 0
+
+    def _forward_progress(name: str) -> None:
+        nonlocal done
+        done += 1
+        if on_progress:
+            on_progress(done, total, name)
+
+    return run_contract_analysis(
+        result.applicants,
+        result.stats,
+        result.score,
+        year,
+        direction_id,
+        use_cache=use_cache,
+        p_likely=p_likely,
+        on_progress=_forward_progress,
     )

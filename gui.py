@@ -13,7 +13,9 @@ from typing import List, Optional
 import customtkinter as ctk
 
 from abit_parser import settings
-from abit_parser.engine import AnalysisError, AnalysisResult, run_analysis
+from abit_parser.contract_analysis import ContractResult
+from abit_parser.engine import AnalysisError, AnalysisResult, run_analysis, run_contract_chance
+from abit_parser.format_text import chance_line, rank_strip
 from abit_parser.summarize import (
     PROVIDER_GEMINI,
     PROVIDER_OFFLINE,
@@ -38,7 +40,9 @@ class App(ctk.CTk):
 
         self._queue: "queue.Queue" = queue.Queue()
         self._result: Optional[AnalysisResult] = None
+        self._contract_result: Optional[ContractResult] = None
         self._analyzing = False
+        self._computing_contract = False
 
         self._build_form()
         self._build_results()
@@ -123,6 +127,26 @@ class App(ctk.CTk):
         )
         self.summary_label.pack(fill="x", padx=8, pady=8)
 
+        contract_frame = ctk.CTkFrame(results, fg_color="transparent")
+        contract_frame.pack(fill="x", padx=8, pady=(0, 4))
+
+        self.contract_button = ctk.CTkButton(
+            contract_frame,
+            text="Порахувати шанс на контракт",
+            command=self._start_contract,
+            state="disabled",
+        )
+        self.contract_button.pack(anchor="w", pady=(6, 2))
+
+        self.contract_summary_label = ctk.CTkLabel(
+            contract_frame, text="", justify="left", anchor="w", wraplength=900
+        )
+        self.contract_summary_label.pack(fill="x", pady=(0, 6))
+
+        self.contract_text = ctk.CTkTextbox(results, height=90, wrap="word")
+        self.contract_text.pack(fill="x", padx=8, pady=(0, 8))
+        self.contract_text.configure(state="disabled")
+
         header = ctk.CTkFrame(results, fg_color="transparent")
         header.pack(fill="x", padx=8)
         for i, (title, w) in enumerate(zip(TABLE_COLUMNS, TABLE_WIDTHS)):
@@ -180,6 +204,10 @@ class App(ctk.CTk):
         self._analyzing = True
         self.analyze_button.configure(state="disabled", text="Аналізую...")
         self.explain_button.configure(state="disabled")
+        self.contract_button.configure(state="disabled", text="Порахувати шанс на контракт")
+        self._contract_result = None
+        self.contract_summary_label.configure(text="")
+        self._set_textbox(self.contract_text, "")
         self.progress_bar.set(0)
         self.status_label.configure(text="Завантажую сторінку...")
         self._clear_table()
@@ -223,15 +251,35 @@ class App(ctk.CTk):
                     self._on_explain_done(item[1])
                 elif kind == "explain_error":
                     self._on_explain_error(item[1])
+                elif kind == "contract_progress":
+                    _, done, total, name = item
+                    self.progress_bar.set(done / total if total else 0)
+                    self.status_label.configure(text=f"Контракт: {done}/{total} — {name}")
+                elif kind == "contract_done":
+                    self._on_contract_done(item[1])
+                elif kind == "contract_error":
+                    self._on_contract_error(item[1])
         except queue.Empty:
             pass
         self.after(100, self._poll_queue)
+
+    @staticmethod
+    def _set_textbox(widget: ctk.CTkTextbox, text: str) -> None:
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        if text:
+            widget.insert("1.0", text)
+        widget.configure(state="disabled")
 
     def _on_analysis_done(self, result: AnalysisResult) -> None:
         self._result = result
         self._analyzing = False
         self.analyze_button.configure(state="normal", text="Аналізувати")
         self.explain_button.configure(state="normal")
+        if result.stats.k is None:
+            self.contract_button.configure(state="disabled", text="Контракт: К не вказано в шапці")
+        else:
+            self.contract_button.configure(state="normal", text="Порахувати шанс на контракт")
         self.progress_bar.set(1)
         self.status_label.configure(text="Готово.")
 
@@ -243,10 +291,10 @@ class App(ctk.CTk):
         ]
         cc = result.cross_check
         if cc is not None:
-            lines.append(
-                f"Крос-аналіз v2: очікувана {cc.expected_count:.1f}, межі "
-                f"{cc.optimistic_bound}—{cc.pessimistic_bound}, шанс {cc.chance * 100:.0f}% (евристика)"
-            )
+            lines.append("Крос-аналіз v2:")
+            lines.append(rank_strip(cc.optimistic_bound, cc.expected_count, cc.pessimistic_bound, cc.m))
+            lines.append(f"Вердикт: {cc.verdict}")
+            lines.append(chance_line(cc.chance, cc.pessimistic_chance, cc.optimistic_chance))
         for w in result.warnings:
             lines.append(f"⚠ {w}")
         self.summary_label.configure(text="\n".join(lines))
@@ -288,6 +336,70 @@ class App(ctk.CTk):
         self.status_label.configure(text="Помилка.")
         messagebox.showerror("Помилка аналізу", message)
 
+    # --------------------------------------------------------------- контракт
+
+    def _start_contract(self) -> None:
+        if self._result is None or self._computing_contract:
+            return
+
+        self._computing_contract = True
+        self.contract_button.configure(state="disabled", text="Рахую...")
+        self.progress_bar.set(0)
+        self.status_label.configure(text="Рахую шанс на контракт...")
+        self.contract_summary_label.configure(text="")
+        self._set_textbox(self.contract_text, "")
+
+        result = self._result
+
+        def on_progress(done: int, total: int, name: str) -> None:
+            self._queue.put(("contract_progress", done, total, name))
+
+        def worker() -> None:
+            try:
+                cr = run_contract_chance(result, on_progress=on_progress)
+                self._queue.put(("contract_done", cr))
+            except AnalysisError as e:
+                self._queue.put(("contract_error", str(e)))
+            except Exception as e:
+                self._queue.put(("contract_error", f"Неочікувана помилка: {e}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_contract_done(self, cr: ContractResult) -> None:
+        self._contract_result = cr
+        self._computing_contract = False
+        self.contract_button.configure(state="normal", text="Порахувати шанс на контракт")
+        self.progress_bar.set(1)
+        self.status_label.configure(text="Готово.")
+
+        self.contract_summary_label.configure(
+            text="\n".join(
+                [
+                    rank_strip(cr.optimistic_bound, cr.expected_count, cr.pessimistic_bound, cr.k),
+                    f"Вердикт: {cr.verdict}",
+                    chance_line(cr.chance, cr.pessimistic_chance, cr.optimistic_chance),
+                ]
+            )
+        )
+
+        lines = [
+            f"Контрактний пул (усі бали): {cr.pool_size_total}. Вище вашого балу: {cr.hard_count} твердих + "
+            f"{len(cr.assessments)} перевірених.",
+        ]
+        for a in cr.assessments:
+            applicant = a.member.applicant
+            target = f" -> {a.best_choice.university} / {a.best_choice.specialty}" if a.best_choice else ""
+            note = f" ({a.note})" if a.note else ""
+            lines.append(f"{applicant.name} [{a.member.origin}/{a.status}]{target}{note}")
+        self._set_textbox(self.contract_text, "\n".join(lines))
+
+    def _on_contract_error(self, message: str) -> None:
+        self._computing_contract = False
+        self.contract_button.configure(state="normal", text="Порахувати шанс на контракт")
+        self.progress_bar.set(0)
+        self.status_label.configure(text="Помилка.")
+        messagebox.showerror("Помилка розрахунку контракту", message)
+
     # -------------------------------------------------------------- пояснення
 
     def _start_explain(self) -> None:
@@ -301,11 +413,9 @@ class App(ctk.CTk):
             return
 
         self.explain_button.configure(state="disabled", text="Пояснюю...")
-        self.explain_text.configure(state="normal")
-        self.explain_text.delete("1.0", "end")
-        self.explain_text.configure(state="disabled")
+        self._set_textbox(self.explain_text, "")
 
-        payload = build_depersonalized_payload(self._result)
+        payload = build_depersonalized_payload(self._result, self._contract_result)
 
         def worker() -> None:
             try:
@@ -320,9 +430,7 @@ class App(ctk.CTk):
 
     def _on_explain_done(self, text: str) -> None:
         self.explain_button.configure(state="normal", text="Пояснити")
-        self.explain_text.configure(state="normal")
-        self.explain_text.insert("1.0", text)
-        self.explain_text.configure(state="disabled")
+        self._set_textbox(self.explain_text, text)
 
     def _on_explain_error(self, message: str) -> None:
         self.explain_button.configure(state="normal", text="Пояснити")

@@ -1,21 +1,13 @@
 import argparse
-import re
 import sys
 
-import requests
-from bs4 import BeautifulSoup
-
 from . import config
-from .cross_analysis import CrossCheckResult, run_cross_check
-from .explain import generate_explanation
+from .cross_analysis import CrossCheckResult
+from .engine import AnalysisError, AnalysisResult, run_analysis
 from .models import DirectionStats
 from .output import write_json, write_md
-from .parse import parse_applicants, parse_stats
-from .scraper import fetch_page
-from .verdict import VerdictResult, budget_applicants, build_verdict
-
-DIRECTION_ID_RE = re.compile(r"/direction/(\d+)")
-YEAR_RE = re.compile(r"/rate(\d{4})/")
+from .summarize import PROVIDER_ANTHROPIC, SummarizeError, build_depersonalized_payload, generate_summary
+from .verdict import VerdictResult
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -99,7 +91,10 @@ def format_cross_check_report(cc: CrossCheckResult) -> str:
         f"лишаються: {cc.stays_count}  ймовірно підуть: {cc.likely_count}  "
         f"точно підуть: {cc.definite_count}  невизначено: {cc.unknown_count}"
     )
-    lines.append(f"Оптимістична межа: {cc.optimistic_bound}  Очікувана: {cc.expected_count:.1f}  Песимістична: {cc.pessimistic_bound}  (M={cc.m})")
+    lines.append(
+        f"Оптимістична межа: {cc.optimistic_bound}  Очікувана: {cc.expected_count:.1f}  "
+        f"Песимістична: {cc.pessimistic_bound}  (M={cc.m})"
+    )
     lines.append(f"Оцінка шансу проходження: {cc.chance * 100:.0f}%  (евристика, не строга ймовірність)")
     lines.append("")
     lines.append("Деталі по групі ризику:")
@@ -108,95 +103,67 @@ def format_cross_check_report(cc: CrossCheckResult) -> str:
         choice_note = ""
         if a.best_choice:
             bc = a.best_choice
-            choice_note = f" -> вищий пріоритет: {bc.university} / {bc.specialty} поз.{bc.position} (БМmax={bc.seats.bm_max}, БМmin={bc.seats.bm_min})"
+            choice_note = (
+                f" -> вищий пріоритет: {bc.university} / {bc.specialty} поз.{bc.position} "
+                f"(БМmax={bc.seats.bm_max}, БМmin={bc.seats.bm_min})"
+            )
         note = f"  ({a.note})" if a.note else ""
         lines.append(f"  {applicant.name:<25} [{a.status}]{choice_note}{note}")
     return "\n".join(lines)
+
+
+def _console_progress(done: int, total: int, name: str) -> None:
+    print(f"  крос-аналіз {done}/{total}: {name}...")
 
 
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
 
     print(f"Завантажую: {args.url}")
-    try:
-        html = fetch_page(args.url)
-    except requests.RequestException as e:
-        print(f"Помилка запиту: {e}")
-        return 1
-
-    soup = BeautifulSoup(html, "html.parser")
 
     try:
-        stats = parse_stats(soup)
-        applicants = parse_applicants(soup)
-    except ValueError as e:
-        print(f"Помилка розбору сторінки: {e}")
+        result: AnalysisResult = run_analysis(
+            args.url,
+            args.score,
+            args.priority,
+            args.funding,
+            cross_check=args.cross_check,
+            p_likely=args.p_likely,
+            use_cache=args.use_cache,
+            on_progress=_console_progress if args.cross_check else None,
+        )
+    except AnalysisError as e:
+        print(str(e))
         return 1
 
-    if not applicants:
-        print("Не знайдено жодного рядка заявок — перевірте посилання.")
-        return 1
-
-    budget = budget_applicants(applicants)
-    result = build_verdict(applicants, stats, args.score)
-
-    report = format_report(stats, result, args.score, args.priority, args.funding)
+    report = format_report(result.stats, result.verdict, args.score, args.priority, args.funding)
     print()
-    print(f"Бюджетних заявок у списку (після відкидання дублів/відмов): {len(budget)}")
+    print(f"Бюджетних заявок у списку (після відкидання дублів/відмов): {result.budget_count}")
     print()
     print(report)
 
-    cross_result = None
-    if args.cross_check:
-        dir_match = DIRECTION_ID_RE.search(args.url)
-        year_match = YEAR_RE.search(args.url)
-        if not dir_match or not year_match:
-            print(
-                "\nНе вдалось витягти direction_id/рік з URL — пропускаю крос-аналіз v2, лишаю вердикт v1."
-            )
-        elif not result.competitors:
-            pass  # нема кого перевіряти — v1 вже фінальний
-        else:
-            direction_id = int(dir_match.group(1))
-            year = int(year_match.group(1))
-            try:
-                cross_result = run_cross_check(
-                    result, year, direction_id, use_cache=args.use_cache, p_likely=args.p_likely
-                )
-                print(format_cross_check_report(cross_result))
-            except Exception as e:
-                print(f"\nКрос-аналіз v2 впав ({e}) — лишаю вердикт v1 без змін.")
-                cross_result = None
+    for w in result.warnings:
+        print(f"\n{w}")
+
+    if result.cross_check is not None:
+        print(format_cross_check_report(result.cross_check))
 
     if args.explain:
-        payload = {
-            "direction": stats.title,
-            "verdict_v1": result.verdict,
-            "m": result.m,
-            "optimistic_bound": result.optimistic_bound,
-            "pessimistic_bound": result.pessimistic_bound,
-        }
-        if cross_result is not None:
-            payload["cross_check_v2"] = {
-                "chance": cross_result.chance,
-                "optimistic_bound": cross_result.optimistic_bound,
-                "expected_count": cross_result.expected_count,
-                "pessimistic_bound": cross_result.pessimistic_bound,
-                "hard_count": cross_result.hard_count,
-                "stays_count": cross_result.stays_count,
-                "likely_count": cross_result.likely_count,
-                "definite_count": cross_result.definite_count,
-                "unknown_count": cross_result.unknown_count,
-            }
-        explanation = generate_explanation(payload)
-        if explanation:
+        payload = build_depersonalized_payload(result)
+        try:
+            explanation = generate_summary(payload, provider=PROVIDER_ANTHROPIC)
             print("\n=== Пояснення (LLM) ===")
             print(explanation)
+        except SummarizeError as e:
+            print(f"\n{e}")
 
     if args.json:
-        write_json(args.json, stats, result, cross_result)
+        write_json(args.json, result.stats, result.verdict, result.cross_check)
     if args.md:
-        write_md(args.md, report + (format_cross_check_report(cross_result) if cross_result else ""))
+        md_text = report
+        if result.cross_check is not None:
+            md_text += format_cross_check_report(result.cross_check)
+        write_md(args.md, md_text)
 
     return 0
 

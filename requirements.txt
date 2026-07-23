@@ -2,5 +2,12 @@ requests
 beautifulsoup4
 certifi
 
-# опційно, лише для --explain:
-# anthropic
+# для GUI (gui.py):
+# customtkinter
+
+# для сумаризації (--explain / кнопка "Пояснити" в GUI), опційно, за провайдером:
+# google-genai   (Gemini, дефолт у GUI)
+# anthropic      (--explain у CLI)
+
+# для компіляції в exe (див. PACKAGING.md):
+# pyinstaller

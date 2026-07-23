@@ -1,4 +1,3 @@
-CACHE_DIR = ".cache/search"
 THROTTLE_MIN_SECONDS = 1.0
 THROTTLE_MAX_SECONDS = 3.0
 SEARCH_URL = "https://abit-poisk.org.ua/api/statements/"

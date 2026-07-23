@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import List, Optional
 
-from .config import CACHE_DIR
+from .paths import get_cache_dir
 
 
 def _cache_key(name: str, year: int) -> str:
@@ -14,7 +14,7 @@ def _cache_key(name: str, year: int) -> str:
 
 
 def _cache_path(name: str, year: int) -> Path:
-    return Path(CACHE_DIR) / f"{_cache_key(name, year)}.json"
+    return get_cache_dir() / f"{_cache_key(name, year)}.json"
 
 
 def get(name: str, year: int) -> Optional[List[dict]]:

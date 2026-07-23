@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from .config import P_LIKELY_DEFAULT
 from .models import SearchApplication, Seats
@@ -125,13 +125,16 @@ def run_cross_check(
     current_direction_id: int,
     use_cache: bool = True,
     p_likely: float = P_LIKELY_DEFAULT,
+    on_progress: Optional[Callable[[str], None]] = None,
 ) -> CrossCheckResult:
     pool = [c for c in verdict_result.competitors if c.category == "група ризику"]
     hard_count = sum(1 for c in verdict_result.competitors if c.category == "залізний")
 
-    assessments = [
-        assess_competitor(c, year, current_direction_id, use_cache, p_likely) for c in pool
-    ]
+    assessments: List[RiskAssessment] = []
+    for c in pool:
+        assessments.append(assess_competitor(c, year, current_direction_id, use_cache, p_likely))
+        if on_progress:
+            on_progress(c.applicant.name)
 
     matched = [a for a in assessments if a.status != STATUS_UNKNOWN]
     unknown = [a for a in assessments if a.status == STATUS_UNKNOWN]

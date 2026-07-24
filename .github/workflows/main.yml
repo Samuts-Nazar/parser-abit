@@ -39,5 +39,5 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/abit-bot:latest
-            ghcr.io/${{ github.repository_owner }}/abit-bot:${{ steps.tag_version.outputs.new_tag }}
+            ghcr.io/samuts-nazar/abit-bot:latest
+            ghcr.io/samuts-nazar/abit-bot:${{ steps.tag_version.outputs.new_tag }}

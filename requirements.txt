@@ -13,5 +13,5 @@ certifi
 # pyinstaller
 
 # для Telegram-бота (bot.py, див. BOT.md):
-# python-telegram-bot[job-queue]==22.8   (job-queue — для стеження, тягне apscheduler)
-# python-dotenv
+python-telegram-bot[job-queue]==22.8   (job-queue — для стеження, тягне apscheduler)
+python-dotenv

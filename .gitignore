@@ -12,3 +12,6 @@ dist/
 
 # Логи (NSSM error.log/service.log і т.п.)
 *.log
+
+# Локальні налаштування Claude Code (специфічні для машини/юзера)
+.claude/settings.local.json

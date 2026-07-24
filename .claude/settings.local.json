@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -c \"import requests, bs4, certifi; print\\('deps ok'\\)\")"
-    ]
-  }
-}

@@ -19,7 +19,7 @@ import random
 import sys
 import time
 from datetime import time as dtime
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from dotenv import load_dotenv
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -38,6 +38,7 @@ from telegram.ext import (
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import bot_storage
+from abit_parser import catalog
 from abit_parser.contract_analysis import ContractResult
 from abit_parser.engine import (
     AnalysisError,
@@ -61,9 +62,12 @@ logger = logging.getLogger(__name__)
 
 CHECK_CODE, ASK_URL, ASK_SCORE, ASK_PRIORITY, ASK_FUNDING = range(5)
 CHAIN_ASK_URL, CHAIN_ASK_SCORE, CHAIN_ASK_PRIORITY, CHAIN_ASK_FUNDING, CHAIN_ASK_MORE = range(5, 10)
+PICK_REGION, PICK_UNIVERSITY, PICK_SPECIALTY_QUERY, PICK_SPECIALTY_RESULT = range(10, 14)
 
 MESSAGE_LIMIT = 3500  # запас під ліміт Telegram у 4096 символів
 MAX_CHAIN_ENTRIES = 9  # більше пріоритетів у заявці не буває
+PICK_PAGE_SIZE = 8  # кнопок на сторінку у вибору ВНЗ/спеціальності
+PICK_SPECIALTY_SEARCH_THRESHOLD = 15  # більше — питаємо ключове слово, а не гортаємо сторінки
 
 # Стеження: фіксовані моменти доби (по системному годиннику машини), а не
 # "раз на 12 год від старту процесу" — інакше графік "поплив" би після
@@ -164,7 +168,8 @@ async def check_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def _ask_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(t("greeting.welcome"))
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(t("pick.button_start"), callback_data="pick_start")]])
+    await update.message.reply_text(t("greeting.welcome"), reply_markup=keyboard)
     return ASK_URL
 
 
@@ -710,6 +715,180 @@ async def chain_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
+# --------------------------------------- вибір область → ВНЗ → спеціальність
+
+
+def _truncate_label(label: str, limit: int = 60) -> str:
+    return label if len(label) <= limit else label[: limit - 1] + "…"
+
+
+def _paginated_keyboard(
+    items: List[Tuple[str, str]], page: int, page_size: int, select_prefix: str, page_prefix: str
+) -> Tuple[InlineKeyboardMarkup, int]:
+    """items — вже готові (лейбл, idx) пари, ідекс — рядком, у сташений повний
+    список (щоб не пхати довгі назви/id у callback_data — там ліміт 64 байти)."""
+    start = page * page_size
+    rows = [
+        [InlineKeyboardButton(_truncate_label(label), callback_data=f"{select_prefix}:{idx}")]
+        for label, idx in items[start : start + page_size]
+    ]
+
+    total_pages = max(1, (len(items) + page_size - 1) // page_size)
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"{page_prefix}:{page - 1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"{page_prefix}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    return InlineKeyboardMarkup(rows), total_pages
+
+
+def _specialty_label(s: catalog.Specialty) -> str:
+    return f"{s.title} — {s.faculty}" if s.faculty else s.title
+
+
+def _specialty_results_keyboard(specialties: List[catalog.Specialty], page: int) -> Tuple[InlineKeyboardMarkup, int]:
+    items = [(_specialty_label(s), str(i)) for i, s in enumerate(specialties)]
+    keyboard, total = _paginated_keyboard(items, page, PICK_PAGE_SIZE, "pick_s", "pick_s_pg")
+    rows = list(keyboard.inline_keyboard) + [[InlineKeyboardButton(t("pick.button_search_again"), callback_data="pick_s_again")]]
+    return InlineKeyboardMarkup(rows), total
+
+
+def _specialty_results_text(page: int, total: int) -> str:
+    text = t("pick.choose_specialty")
+    if total > 1:
+        text += t("pick.page_suffix", page=page + 1, total=total)
+    return text
+
+
+async def pick_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    year = catalog.get_current_year()
+    context.user_data["pick_year"] = year
+    regions = catalog.list_regions(year)
+    context.user_data["pick_regions"] = regions
+
+    # Областей завжди мало (~25) — без пагінації, просто 2 в ряд.
+    labels = [(r.name, str(i)) for i, r in enumerate(regions)]
+    rows = [
+        [InlineKeyboardButton(_truncate_label(label), callback_data=f"pick_r:{idx}") for label, idx in labels[i : i + 2]]
+        for i in range(0, len(labels), 2)
+    ]
+    await query.message.reply_text(t("pick.choose_region"), reply_markup=InlineKeyboardMarkup(rows))
+    return PICK_REGION
+
+
+async def pick_region_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    idx = int(query.data.split(":")[1])
+    region = context.user_data["pick_regions"][idx]
+    year = context.user_data["pick_year"]
+
+    universities = catalog.list_universities(year, region.id)
+    context.user_data["pick_universities"] = universities
+
+    items = [(u.name, str(i)) for i, u in enumerate(universities)]
+    keyboard, total = _paginated_keyboard(items, 0, PICK_PAGE_SIZE, "pick_u", "pick_u_pg")
+    text = t("pick.choose_university") + (t("pick.page_suffix", page=1, total=total) if total > 1 else "")
+    await query.edit_message_text(text, reply_markup=keyboard)
+    return PICK_UNIVERSITY
+
+
+async def pick_university_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[1])
+    universities = context.user_data.get("pick_universities", [])
+
+    items = [(u.name, str(i)) for i, u in enumerate(universities)]
+    keyboard, total = _paginated_keyboard(items, page, PICK_PAGE_SIZE, "pick_u", "pick_u_pg")
+    text = t("pick.choose_university") + (t("pick.page_suffix", page=page + 1, total=total) if total > 1 else "")
+    await query.edit_message_text(text, reply_markup=keyboard)
+    return PICK_UNIVERSITY
+
+
+async def pick_university_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    idx = int(query.data.split(":")[1])
+    university = context.user_data["pick_universities"][idx]
+    year = context.user_data["pick_year"]
+
+    specialties = catalog.list_specialties(year, university.id)
+    context.user_data["pick_specialties_all"] = specialties
+
+    if len(specialties) <= PICK_SPECIALTY_SEARCH_THRESHOLD:
+        context.user_data["pick_specialties_filtered"] = specialties
+        keyboard, total = _specialty_results_keyboard(specialties, 0)
+        await query.edit_message_text(_specialty_results_text(0, total), reply_markup=keyboard)
+        return PICK_SPECIALTY_RESULT
+
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(t("pick.button_show_all"), callback_data="pick_s_all")]])
+    await query.edit_message_text(t("pick.ask_specialty_query"), reply_markup=keyboard)
+    return PICK_SPECIALTY_QUERY
+
+
+async def pick_specialty_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query_text = update.message.text.strip().lower()
+    specialties = context.user_data.get("pick_specialties_all", [])
+    matches = [s for s in specialties if query_text in s.title.lower() or query_text in s.faculty.lower()]
+
+    if not matches:
+        await update.message.reply_text(t("pick.no_specialty_matches", query=_e(update.message.text.strip())))
+        return PICK_SPECIALTY_QUERY
+
+    context.user_data["pick_specialties_filtered"] = matches
+    keyboard, total = _specialty_results_keyboard(matches, 0)
+    await update.message.reply_text(_specialty_results_text(0, total), reply_markup=keyboard)
+    return PICK_SPECIALTY_RESULT
+
+
+async def pick_specialty_show_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    specialties = context.user_data.get("pick_specialties_all", [])
+    context.user_data["pick_specialties_filtered"] = specialties
+
+    keyboard, total = _specialty_results_keyboard(specialties, 0)
+    await query.edit_message_text(_specialty_results_text(0, total), reply_markup=keyboard)
+    return PICK_SPECIALTY_RESULT
+
+
+async def pick_specialty_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[1])
+    specialties = context.user_data.get("pick_specialties_filtered", [])
+
+    keyboard, total = _specialty_results_keyboard(specialties, page)
+    await query.edit_message_text(_specialty_results_text(page, total), reply_markup=keyboard)
+    return PICK_SPECIALTY_RESULT
+
+
+async def pick_specialty_search_again(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(t("pick.button_show_all"), callback_data="pick_s_all")]])
+    await query.edit_message_text(t("pick.ask_specialty_query"), reply_markup=keyboard)
+    return PICK_SPECIALTY_QUERY
+
+
+async def pick_specialty_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    idx = int(query.data.split(":")[1])
+    specialty = context.user_data["pick_specialties_filtered"][idx]
+    year = context.user_data["pick_year"]
+
+    context.user_data["url"] = f"https://abit-poisk.org.ua/rate{year}/direction/{specialty.direction_id}"
+    await query.edit_message_text(t("input.ask_score"))
+    return ASK_SCORE
+
+
 async def _safe_edit(message, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> None:
     try:
         await message.edit_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
@@ -845,10 +1024,27 @@ def main() -> None:
         entry_points=[CommandHandler("start", start)],
         states={
             CHECK_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, check_code)],
-            ASK_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_score)],
+            ASK_URL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, ask_score),
+                CallbackQueryHandler(pick_start, pattern="^pick_start$"),
+            ],
             ASK_SCORE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_priority)],
             ASK_PRIORITY: [CallbackQueryHandler(ask_funding, pattern=r"^pr:\d$")],
             ASK_FUNDING: [CallbackQueryHandler(run_analysis_step, pattern=r"^fn:[БК]$")],
+            PICK_REGION: [CallbackQueryHandler(pick_region_chosen, pattern=r"^pick_r:\d+$")],
+            PICK_UNIVERSITY: [
+                CallbackQueryHandler(pick_university_page, pattern=r"^pick_u_pg:\d+$"),
+                CallbackQueryHandler(pick_university_chosen, pattern=r"^pick_u:\d+$"),
+            ],
+            PICK_SPECIALTY_QUERY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, pick_specialty_search),
+                CallbackQueryHandler(pick_specialty_show_all, pattern="^pick_s_all$"),
+            ],
+            PICK_SPECIALTY_RESULT: [
+                CallbackQueryHandler(pick_specialty_page, pattern=r"^pick_s_pg:\d+$"),
+                CallbackQueryHandler(pick_specialty_chosen, pattern=r"^pick_s:\d+$"),
+                CallbackQueryHandler(pick_specialty_search_again, pattern="^pick_s_again$"),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
     )

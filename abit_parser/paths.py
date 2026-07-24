@@ -18,5 +18,11 @@ def get_cache_dir() -> Path:
     return path
 
 
+def get_catalog_cache_dir() -> Path:
+    path = get_app_data_dir() / "cache" / "catalog"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def get_config_path() -> Path:
     return get_app_data_dir() / "config.json"

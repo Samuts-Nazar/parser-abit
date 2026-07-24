@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 from .config import P_LIKELY_DEFAULT
 from .contract_analysis import ContractResult, build_contract_pool, run_contract_analysis
 from .cross_analysis import CrossCheckResult, run_cross_check
+from .estimate import TIER_PASS, tier_of
 from .models import Applicant, DirectionStats
 from .parse import parse_applicants, parse_stats
 from .scraper import fetch_page
@@ -117,6 +118,78 @@ def run_analysis(
         funding=funding,
         cross_check=cross_result,
         warnings=warnings,
+    )
+
+
+@dataclass
+class PriorityEntry:
+    """Одна заявка користувача — url + бал + пріоритет + форма фінансування."""
+
+    url: str
+    score: float
+    priority: int
+    funding: str
+
+
+@dataclass
+class ChainItem:
+    entry: PriorityEntry
+    result: AnalysisResult
+    tier: str  # estimate.TIER_PASS | TIER_BORDERLINE | TIER_FAIL
+
+
+@dataclass
+class PriorityChainResult:
+    items: List[ChainItem]  # відсортовано за зростанням priority
+    landing_item: Optional[ChainItem]  # перший TIER_PASS за пріоритетом, або None
+    duplicate_priority_warning: bool  # True, якщо два входи мають однаковий priority
+
+
+def run_priority_chain(
+    entries: List[PriorityEntry],
+    p_likely: float = P_LIKELY_DEFAULT,
+    use_cache: bool = True,
+    on_progress: Optional[ProgressCallback] = None,
+) -> PriorityChainResult:
+    """Аналіз по кількох заявках одного користувача одразу ("де я реально
+    приземлюсь") — жодної нової математики, лише оркестрація над
+    run_analysis(): прогнати кожну заявку окремо (як і зараз), відсортувати
+    за пріоритетом і знайти перший, де вердикт впевнено "проходиш"."""
+    sorted_entries = sorted(entries, key=lambda e: e.priority)
+    priorities = [e.priority for e in sorted_entries]
+    duplicate_priority_warning = len(priorities) != len(set(priorities))
+
+    total = len(sorted_entries)
+    items: List[ChainItem] = []
+
+    for i, entry in enumerate(sorted_entries):
+
+        def _inner_progress(done: int, total_c: int, name: str, i=i, entry=entry) -> None:
+            if on_progress:
+                on_progress(i, total, f"Пріоритет {entry.priority} — {name} ({done}/{total_c})")
+
+        result = run_analysis(
+            entry.url,
+            entry.score,
+            entry.priority,
+            entry.funding,
+            cross_check=True,
+            p_likely=p_likely,
+            use_cache=use_cache,
+            on_progress=_inner_progress,
+        )
+        verdict_str = result.cross_check.verdict if result.cross_check is not None else result.verdict.verdict
+        items.append(ChainItem(entry=entry, result=result, tier=tier_of(verdict_str)))
+
+        if on_progress:
+            on_progress(i + 1, total, f"Пріоритет {entry.priority} — готово")
+
+    landing_item = next((item for item in items if item.tier == TIER_PASS), None)
+
+    return PriorityChainResult(
+        items=items,
+        landing_item=landing_item,
+        duplicate_priority_warning=duplicate_priority_warning,
     )
 
 

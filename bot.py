@@ -39,7 +39,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import bot_storage
 from abit_parser.contract_analysis import ContractResult
-from abit_parser.engine import AnalysisError, AnalysisResult, run_analysis, run_contract_chance
+from abit_parser.engine import (
+    AnalysisError,
+    AnalysisResult,
+    PriorityChainResult,
+    PriorityEntry,
+    run_analysis,
+    run_contract_chance,
+    run_priority_chain,
+)
 from bot_texts import t, t_list
 
 load_dotenv()
@@ -52,8 +60,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 CHECK_CODE, ASK_URL, ASK_SCORE, ASK_PRIORITY, ASK_FUNDING = range(5)
+CHAIN_ASK_URL, CHAIN_ASK_SCORE, CHAIN_ASK_PRIORITY, CHAIN_ASK_FUNDING, CHAIN_ASK_MORE = range(5, 10)
 
 MESSAGE_LIMIT = 3500  # запас під ліміт Telegram у 4096 символів
+MAX_CHAIN_ENTRIES = 9  # більше пріоритетів у заявці не буває
 
 # Стеження: фіксовані моменти доби (по системному годиннику машини), а не
 # "раз на 12 год від старту процесу" — інакше графік "поплив" би після
@@ -161,9 +171,22 @@ async def _ask_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # --------------------------------------------------------------- діалог вводу
 
 
+def _parse_url(text: str) -> Optional[str]:
+    url = text.strip()
+    return url if "abit-poisk.org.ua" in url else None
+
+
+def _parse_score(text: str) -> Optional[float]:
+    try:
+        score = float(text.strip().replace(",", "."))
+    except ValueError:
+        return None
+    return score if score > 0 else None
+
+
 async def ask_score(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    url = update.message.text.strip()
-    if "abit-poisk.org.ua" not in url:
+    url = _parse_url(update.message.text)
+    if url is None:
         await update.message.reply_text(t("input.invalid_url"))
         return ASK_URL
     context.user_data["url"] = url
@@ -172,12 +195,8 @@ async def ask_score(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def ask_priority(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = update.message.text.strip().replace(",", ".")
-    try:
-        score = float(text)
-        if score <= 0:
-            raise ValueError
-    except ValueError:
+    score = _parse_score(update.message.text)
+    if score is None:
         await update.message.reply_text(t("input.invalid_score"))
         return ASK_SCORE
     context.user_data["score"] = score
@@ -319,6 +338,7 @@ def _format_budget_message(result: AnalysisResult) -> "tuple[str, Optional[Inlin
     rows = [row1] if row1 else []
     if cc is not None:
         rows.append([InlineKeyboardButton(t("budget_result.button_track"), callback_data="track")])
+        rows.append([InlineKeyboardButton(t("chain.button_start"), callback_data="chain")])
 
     keyboard = InlineKeyboardMarkup(rows) if rows else None
     return "\n".join(lines), keyboard
@@ -415,6 +435,48 @@ def _format_contract_details_text(cr: ContractResult) -> str:
     return "\n".join(lines)
 
 
+def _chain_item_chance(item) -> float:
+    cc = item.result.cross_check
+    # без v2-даних результат тут завжди однозначний "пролітаєш" (риск-пул
+    # порожній — інакше цей item вже був би landing_item), тож 0.0 чесно.
+    return cc.chance if cc is not None else 0.0
+
+
+def _format_chain_message(chain: PriorityChainResult) -> str:
+    lines = [t("chain.title"), ""]
+
+    if chain.landing_item is not None:
+        li = chain.landing_item
+        lines.append(t("chain.landing_found", priority=li.entry.priority, title=_e(li.result.stats.title)))
+    else:
+        closest = max(chain.items, key=_chain_item_chance)
+        lines.append(t("chain.landing_none", priority=closest.entry.priority, title=_e(closest.result.stats.title)))
+
+    if chain.duplicate_priority_warning:
+        lines.append("")
+        lines.append(t("chain.duplicate_warning"))
+
+    lines.append("")
+    limit_label = t("budget_result.scenario_limit_label")
+    for item in chain.items:
+        result = item.result
+        cc = result.cross_check
+        lines.append(t("chain.entry_header", priority=item.entry.priority, title=_e(result.stats.title)))
+        if cc is not None:
+            lines.append(_scenario_block(cc.optimistic_bound, cc.expected_count, cc.pessimistic_bound, cc.m, limit_label))
+            lines.append(t("budget_result.verdict", verdict=_e(cc.verdict)))
+        else:
+            v = result.verdict
+            lines.append(
+                t("budget_result.no_v2_place", optimistic=v.optimistic_bound, pessimistic=v.pessimistic_bound, limit=v.m)
+            )
+            lines.append(t("budget_result.verdict", verdict=_e(v.verdict)))
+        lines.append("")
+
+    lines.append(t("chain.caveat"))
+    return "\n".join(lines)
+
+
 def _snapshot_from_cc(cc) -> dict:
     return {
         "verdict": cc.verdict,
@@ -504,6 +566,148 @@ async def periodic_check(context: ContextTypes.DEFAULT_TYPE) -> None:
         await context.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.warning("periodic_check: не вдалось надіслати повідомлення %s: %s", chat_id, e)
+
+
+# --------------------------------------------- аналіз по кількох пріоритетах
+
+
+async def chain_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id
+    result = _last_result.get(chat_id)
+    if result is None:
+        await query.message.reply_text(t("errors.no_saved_analysis"))
+        return ConversationHandler.END
+
+    first_entry = PriorityEntry(url=result.url, score=result.score, priority=result.priority, funding=result.funding)
+    context.user_data["chain_entries"] = [first_entry]
+    await query.message.reply_text(t("chain.ask_url"))
+    return CHAIN_ASK_URL
+
+
+async def chain_ask_score(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    url = _parse_url(update.message.text)
+    if url is None:
+        await update.message.reply_text(t("input.invalid_url"))
+        return CHAIN_ASK_URL
+    context.user_data["chain_draft_url"] = url
+    await update.message.reply_text(t("input.ask_score"))
+    return CHAIN_ASK_SCORE
+
+
+async def chain_ask_priority(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    score = _parse_score(update.message.text)
+    if score is None:
+        await update.message.reply_text(t("input.invalid_score"))
+        return CHAIN_ASK_SCORE
+    context.user_data["chain_draft_score"] = score
+
+    keyboard = [
+        [InlineKeyboardButton(str(p), callback_data=f"pr:{p}") for p in range(1, 6)],
+        [InlineKeyboardButton(str(p), callback_data=f"pr:{p}") for p in range(6, 10)],
+    ]
+    await update.message.reply_text(
+        t("input.ask_priority"),
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return CHAIN_ASK_PRIORITY
+
+
+async def chain_ask_funding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    priority = int(query.data.split(":")[1])
+    context.user_data["chain_draft_priority"] = priority
+
+    keyboard = [
+        [
+            InlineKeyboardButton(t("input.funding_budget_button"), callback_data="fn:Б"),
+            InlineKeyboardButton(t("input.funding_contract_button"), callback_data="fn:К"),
+        ]
+    ]
+    await query.edit_message_text(
+        t("input.ask_funding", priority=priority),
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return CHAIN_ASK_FUNDING
+
+
+async def chain_collect_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    funding = query.data.split(":")[1]
+
+    entry = PriorityEntry(
+        url=context.user_data.pop("chain_draft_url"),
+        score=context.user_data.pop("chain_draft_score"),
+        priority=context.user_data.pop("chain_draft_priority"),
+        funding=funding,
+    )
+    entries: List[PriorityEntry] = context.user_data.setdefault("chain_entries", [])
+    entries.append(entry)
+    n = len(entries)
+
+    text = t("chain.ask_more", n=n)
+    buttons = []
+    if n < MAX_CHAIN_ENTRIES:
+        buttons.append(InlineKeyboardButton(t("chain.button_add_more"), callback_data="chain_more"))
+    else:
+        text += "\n\n" + t("chain.max_reached_note")
+    buttons.append(InlineKeyboardButton(t("chain.button_run", n=n), callback_data="chain_run"))
+
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([buttons]))
+    return CHAIN_ASK_MORE
+
+
+async def chain_add_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(t("chain.ask_url"))
+    return CHAIN_ASK_URL
+
+
+async def chain_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id
+
+    if chat_id in _active_chats:
+        await query.edit_message_text(t("analysis.already_running"))
+        return ConversationHandler.END
+
+    entries: List[PriorityEntry] = context.user_data.get("chain_entries", [])
+    status_msg = await query.edit_message_text(t("chain.starting"))
+    _active_chats.add(chat_id)
+
+    loop = asyncio.get_running_loop()
+    last_edit = [0.0]
+
+    def on_progress(done: int, total: int, name: str) -> None:
+        now = time.monotonic()
+        if now - last_edit[0] < 3.0 and done != total:
+            return
+        last_edit[0] = now
+        text = t("analysis.progress", done=done, total=total, name=_e(name))
+        _run_in_loop_and_wait(_safe_edit(status_msg, text), loop)
+
+    try:
+        chain = await asyncio.to_thread(run_priority_chain, entries, on_progress=on_progress)
+    except AnalysisError as e:
+        await _safe_edit(status_msg, t("analysis.error", error=_e(e)))
+        return ConversationHandler.END
+    except Exception as e:
+        logger.exception("run_priority_chain впав")
+        await _safe_edit(status_msg, t("analysis.unexpected_error", error=_e(e)))
+        return ConversationHandler.END
+    finally:
+        _active_chats.discard(chat_id)
+
+    chunks = _chunk_text(_format_chain_message(chain))
+    await _safe_edit(status_msg, chunks[0])
+    for chunk in chunks[1:]:
+        await context.bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML)
+    return ConversationHandler.END
 
 
 async def _safe_edit(message, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> None:
@@ -649,7 +853,26 @@ def main() -> None:
         fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
     )
 
+    # Окремий conversation handler — аналіз по кількох пріоритетах. Стартує з
+    # кнопки на вже готовому результаті, тому не чіпає основний conv_handler
+    # і не додає жодного зайвого кроку для тих, хто перевіряє одну спеціальність.
+    chain_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(chain_start, pattern="^chain$")],
+        states={
+            CHAIN_ASK_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, chain_ask_score)],
+            CHAIN_ASK_SCORE: [MessageHandler(filters.TEXT & ~filters.COMMAND, chain_ask_priority)],
+            CHAIN_ASK_PRIORITY: [CallbackQueryHandler(chain_ask_funding, pattern=r"^pr:\d$")],
+            CHAIN_ASK_FUNDING: [CallbackQueryHandler(chain_collect_entry, pattern=r"^fn:[БК]$")],
+            CHAIN_ASK_MORE: [
+                CallbackQueryHandler(chain_add_more, pattern="^chain_more$"),
+                CallbackQueryHandler(chain_run, pattern="^chain_run$"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
+    )
+
     application.add_handler(conv_handler)
+    application.add_handler(chain_conv_handler)
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("untrack", untrack_command))
     application.add_handler(CallbackQueryHandler(on_details, pattern="^details$"))

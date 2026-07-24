@@ -5,6 +5,10 @@ from .models import Applicant, DirectionStats
 
 EXCLUDED_STATUSES = {"Відмова"}
 
+VERDICT_PASS = "проходиш"
+VERDICT_BORDERLINE = "на межі"
+VERDICT_FAIL = "пролітаєш"
+
 
 @dataclass
 class Competitor:
@@ -46,11 +50,11 @@ def build_verdict(
     pessimistic_bound = total_count + 1
 
     if pessimistic_bound <= m:
-        verdict = "проходиш"
+        verdict = VERDICT_PASS
     elif optimistic_bound <= m:
-        verdict = "на межі"
+        verdict = VERDICT_BORDERLINE
     else:
-        verdict = "пролітаєш"
+        verdict = VERDICT_FAIL
 
     return VerdictResult(
         m=m,

@@ -1,6 +1,4 @@
-import random
 import re
-import time
 from dataclasses import asdict
 from typing import List
 
@@ -9,9 +7,10 @@ import requests
 from bs4 import BeautifulSoup
 
 from . import cache
-from .config import SEARCH_URL, THROTTLE_MAX_SECONDS, THROTTLE_MIN_SECONDS
+from .config import SEARCH_URL
 from .models import Seats, SearchApplication
 from .scraper import HEADERS as BASE_HEADERS
+from .throttle import throttled_request
 
 SEARCH_HEADERS = {
     **BASE_HEADERS,
@@ -31,19 +30,22 @@ K_RE = re.compile(r"К\s+(\d+)")
 
 def _post_search(query: str, timeout: int = 15) -> dict:
     data = f"search={query}".encode("utf-8")
-    try:
-        resp = requests.post(
-            SEARCH_URL, headers=SEARCH_HEADERS, data=data, timeout=timeout, verify=certifi.where()
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except requests.exceptions.SSLError:
-        import urllib3
+    with throttled_request():
+        try:
+            resp = requests.post(
+                SEARCH_URL, headers=SEARCH_HEADERS, data=data, timeout=timeout, verify=certifi.where()
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.SSLError:
+            import urllib3
 
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        resp = requests.post(SEARCH_URL, headers=SEARCH_HEADERS, data=data, timeout=timeout, verify=False)
-        resp.raise_for_status()
-        return resp.json()
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            resp = requests.post(
+                SEARCH_URL, headers=SEARCH_HEADERS, data=data, timeout=timeout, verify=False
+            )
+            resp.raise_for_status()
+            return resp.json()
 
 
 def _parse_seats(text: str) -> Seats:
@@ -147,7 +149,6 @@ def search_applicant(name: str, year: int, use_cache: bool = True) -> List[Searc
         if cached is not None:
             return [SearchApplication(**{**c, "seats": Seats(**c["seats"])}) for c in cached]
 
-    time.sleep(random.uniform(THROTTLE_MIN_SECONDS, THROTTLE_MAX_SECONDS))
     payload = _post_search(f"{name} {year}")
     results = parse_search_results(payload.get("html", ""))
 

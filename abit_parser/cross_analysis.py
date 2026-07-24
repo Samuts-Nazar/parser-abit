@@ -101,7 +101,7 @@ def assess_competitor(
             competitor=competitor,
             status=STATUS_UNKNOWN,
             p_vacate=0.0,
-            note="Дублікат пріоритету в результатах пошуку — схоже на тезку, не гадаємо",
+            note="Дублікат пріоритету в результатах пошуку — схоже, що в іншої людини таке саме ім'я, не гадаємо",
         )
 
     higher = [a for a in apps if a.priority < applicant.priority]

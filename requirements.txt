@@ -11,3 +11,7 @@ certifi
 
 # для компіляції в exe (див. PACKAGING.md):
 # pyinstaller
+
+# для Telegram-бота (bot.py, див. BOT.md):
+# python-telegram-bot[job-queue]==22.8   (job-queue — для стеження, тягне apscheduler)
+# python-dotenv

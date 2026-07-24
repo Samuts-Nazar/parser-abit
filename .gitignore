@@ -6,3 +6,6 @@ __pycache__/
 # PyInstaller
 build/
 dist/
+
+# Секрети — токен бота і т.п. Ніколи не комітити.
+.env

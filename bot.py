@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bot_storage
 from abit_parser.contract_analysis import ContractResult
 from abit_parser.engine import AnalysisError, AnalysisResult, run_analysis, run_contract_chance
+from bot_texts import t, t_list
 
 load_dotenv()
 
@@ -70,19 +71,6 @@ def _track_times_for_chat(chat_id: int) -> "list[dtime]":
     return [first, second]
 
 
-JOKES_NOTHING_CHANGED = [
-    "Можеш відпустити кнопку F5, списки не рушили з місця. Нічого нового.",
-    "Якби за кожну перевірку без змін тобі додавали бал до НМТ, ти б уже був на бюджеті. Все стабільно.",
-    "Твої конкуренти сплять (або плачуть). Тобі теж варто відпочити. Змін нуль.",
-    "Ситуація під контролем. Ніхто твоє місце не вкрав (принаймні за останні 5 хвилин).",
-    "ЄДЕБО лежить, конкуренти лежать, списки лежать. Все стабільно, змін немає.",
-    "Я перевірив базу швидше, ніж у тебе вчергове сіпнулося око. Видихай, без змін.",
-    "Твоє місце в рейтингу зараз таке ж непохитне, як черга за шаурмою. Нічого не змінилося.",
-    "Спойлер: у новій серії вступної драми нічого не відбулося. Чекаємо далі.",
-    "Я перевірив. Потім перевірив ще раз. Потім згадав, що я бот і не помиляюсь. Змін катма.",
-    "Списки не оновилися. А навіть якби й оновилися, я б тобі сказав. Іди поїж.",
-    "Тиша... Тільки чутно, як десь нервово клікають мишкою тисячі абітурієнтів. У нас без змін."
-]
 # Стан на рівні процесу (приватний бот для кількох людей — простих set/dict досить)
 _verified_chats: Set[int] = set()
 _active_chats: Set[int] = set()
@@ -115,65 +103,32 @@ def _e(text: object) -> str:
 def _person_word(n: int) -> str:
     """Відмінок іменника "особа" за числівником: 1 особа, 2-4 особи, 5+/0/11-14 осіб."""
     if n % 10 == 1 and n % 100 != 11:
-        return "особа"
+        return t("person_word.one")
     if 2 <= n % 10 <= 4 and not (12 <= n % 100 <= 14):
-        return "особи"
-    return "осіб"
-
-
-STATUS_EXPLAIN = {
-    "точно": "точно піде на вищий пріоритет — звільнить місце тут",
-    "ймовірно": "ймовірно піде на вищий пріоритет",
-    "лишається": "найімовірніше лишиться тут (реальний конкурент)",
-    "невизначено": "не вдалось перевірити напевно",
-}
+        return t("person_word.few")
+    return t("person_word.many")
 
 
 def _explain_status(status: str) -> str:
-    return STATUS_EXPLAIN.get(status, status)
+    try:
+        return t(f"status.{status}")
+    except KeyError:
+        return status
 
 
 def _scenario_block(optimistic: int, expected: float, pessimistic: int, limit: int, limit_label: str) -> str:
-    return (
-        f"🔴 Найгірший сценарій: {pessimistic}-те місце\n"
-        f"🟡 Очікувано: {round(expected)}-те місце\n"
-        f"🟢 Найкращий сценарій: {optimistic}-те місце\n"
-        f"{limit_label}: {limit}"
+    return "\n".join(
+        [
+            t("budget_result.scenario_worst", value=pessimistic),
+            t("budget_result.scenario_expected", value=round(expected)),
+            t("budget_result.scenario_best", value=optimistic),
+            t("budget_result.scenario_limit", label=limit_label, value=limit),
+        ]
     )
 
 
-HELP_TEXT = (
-    "🎓 <b>Що робить Калькулятор потужності</b>\n"
-    "Показує не просто місце в рейтинговому списку, а реальний шанс пройти — з урахуванням того, що "
-    "частина людей вище за балом можуть піти на свій вищий пріоритет і звільнити місце тут. Без ворожіння "
-    "на кавовій гущі — тільки цифри з реальних даних сайту.\n\n"
-    "<b>Як користуватись</b>\n"
-    "1. /start — почати\n"
-    "2. Надіслати посилання на напрям (abit-poisk.org.ua)\n"
-    "3. Вказати свій бал\n"
-    "4. Обрати пріоритет заяви на цю спеціальність (кнопками)\n"
-    "5. Обрати бюджет чи контракт (кнопками)\n"
-    "6. Дочекатись аналізу (до ~2 хв — бот перевіряє кожного конкурента вище окремо, тому не миттєво)\n\n"
-    "<b>Що означають три сценарії</b>\n"
-    "🔴 Найгірший — якщо ніхто з конкурентів вище нікуди не піде\n"
-    "🟡 Очікувано — зважена оцінка, скільки з них реально підуть на вищий пріоритет\n"
-    "🟢 Найкращий — якщо всі, хто може піти, підуть\n\n"
-    "<b>Що таке «невизначено»</b>\n"
-    "Частину людей не вдалось перевірити напевно — у когось іншого знайшлось таке саме ім'я та прізвище "
-    "(і незрозуміло, хто з них саме той) або сайт не відповів. Це чесно показується окремо, а не ховається "
-    "у «підуть» чи «лишаються».\n\n"
-    "<b>Кнопки після результату</b>\n"
-    "«Хто саме вище мене» — повний список конкурентів вище твого балу і що з кожним\n"
-    "«Шанс на контракт» — той самий розрахунок, але для контрактних місць\n"
-    "«Стежити» — раз на 12 год сам перерахую і напишу, якщо щось зміниться (а якщо ні — просто щось "
-    "зажартую). /untrack — зупинити стеження\n\n"
-    "Усе — детермінований розрахунок з реальних даних сайту, без ШІ.\n"
-    "/cancel — скасувати поточний діалог."
-)
-
-
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML)
+    await update.message.reply_text(t("help.text"), parse_mode=ParseMode.HTML)
 
 
 # ------------------------------------------------------------------ доступ
@@ -184,7 +139,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
 
     if ACCESS_CODE and chat_id not in _verified_chats:
-        await update.message.reply_text("Привіт! Цей бот приватний. Введи код доступу:")
+        await update.message.reply_text(t("greeting.access_code_prompt"))
         return CHECK_CODE
 
     return await _ask_url(update, context)
@@ -194,18 +149,12 @@ async def check_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.message.text.strip() == ACCESS_CODE:
         _verified_chats.add(update.effective_chat.id)
         return await _ask_url(update, context)
-    await update.message.reply_text("Невірний код. Спробуй ще раз:")
+    await update.message.reply_text(t("greeting.access_code_wrong"))
     return CHECK_CODE
 
 
 async def _ask_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
-        "👋 Привіт, тут Калькулятор потужності. Порахую реальний шанс пройти на бюджет (і на контракт) "
-        "на обрану спеціальність — без істерики, самі цифри.\n\n"
-        "Що саме і як рахується — /help.\n\n"
-        "Надішли посилання на напрям з abit-poisk.org.ua, напр.:\n"
-        "https://abit-poisk.org.ua/rate2026/direction/1613482"
-    )
+    await update.message.reply_text(t("greeting.welcome"))
     return ASK_URL
 
 
@@ -215,10 +164,10 @@ async def _ask_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def ask_score(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     url = update.message.text.strip()
     if "abit-poisk.org.ua" not in url:
-        await update.message.reply_text("Це не схоже на посилання abit-poisk.org.ua. Спробуй ще раз:")
+        await update.message.reply_text(t("input.invalid_url"))
         return ASK_URL
     context.user_data["url"] = url
-    await update.message.reply_text("Який у тебе конкурсний бал на цю спеціальність?")
+    await update.message.reply_text(t("input.ask_score"))
     return ASK_SCORE
 
 
@@ -229,7 +178,7 @@ async def ask_priority(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         if score <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("Бал має бути числом, напр. 185.077. Спробуй ще раз:")
+        await update.message.reply_text(t("input.invalid_score"))
         return ASK_SCORE
     context.user_data["score"] = score
 
@@ -238,7 +187,7 @@ async def ask_priority(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         [InlineKeyboardButton(str(p), callback_data=f"pr:{p}") for p in range(6, 10)],
     ]
     await update.message.reply_text(
-        "Яким пріоритетом у заяві вказана саме ця спеціальність? (число від 1 до 9)",
+        t("input.ask_priority"),
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return ASK_PRIORITY
@@ -252,12 +201,12 @@ async def ask_funding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     keyboard = [
         [
-            InlineKeyboardButton("Бюджет (Б)", callback_data="fn:Б"),
-            InlineKeyboardButton("Контракт (К)", callback_data="fn:К"),
+            InlineKeyboardButton(t("input.funding_budget_button"), callback_data="fn:Б"),
+            InlineKeyboardButton(t("input.funding_contract_button"), callback_data="fn:К"),
         ]
     ]
     await query.edit_message_text(
-        f"Пріоритет: {priority}. Ця заява — на бюджет чи на контракт?",
+        t("input.ask_funding", priority=priority),
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return ASK_FUNDING
@@ -274,14 +223,14 @@ async def run_analysis_step(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     chat_id = update.effective_chat.id
     if chat_id in _active_chats:
-        await query.edit_message_text("Вже рахую попередній аналіз для тебе — зачекай на результат.")
+        await query.edit_message_text(t("analysis.already_running"))
         return ConversationHandler.END
 
     url = context.user_data["url"]
     score = context.user_data["score"]
     priority = context.user_data["priority"]
 
-    status_msg = await query.edit_message_text("Аналізую… (до ~2 хв)")
+    status_msg = await query.edit_message_text(t("analysis.starting"))
     _active_chats.add(chat_id)
 
     loop = asyncio.get_running_loop()
@@ -292,7 +241,7 @@ async def run_analysis_step(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if now - last_edit[0] < 3.0 and done != total:
             return
         last_edit[0] = now
-        text = f"Аналізую… {done}/{total}: {_e(name)}"
+        text = t("analysis.progress", done=done, total=total, name=_e(name))
         _run_in_loop_and_wait(_safe_edit(status_msg, text), loop)
 
     try:
@@ -300,11 +249,11 @@ async def run_analysis_step(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             run_analysis, url, score, priority, funding, cross_check=True, on_progress=on_progress
         )
     except AnalysisError as e:
-        await _safe_edit(status_msg, f"Помилка: {_e(e)}")
+        await _safe_edit(status_msg, t("analysis.error", error=_e(e)))
         return ConversationHandler.END
     except Exception as e:
         logger.exception("run_analysis впав")
-        await _safe_edit(status_msg, f"Неочікувана помилка: {_e(e)}")
+        await _safe_edit(status_msg, t("analysis.unexpected_error", error=_e(e)))
         return ConversationHandler.END
     finally:
         _active_chats.discard(chat_id)
@@ -319,7 +268,7 @@ async def run_analysis_step(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
-    await update.message.reply_text("Скасовано. /start (з меню або текстом) — щоб почати заново.")
+    await update.message.reply_text(t("input.cancelled"))
     return ConversationHandler.END
 
 
@@ -327,44 +276,49 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 def _format_budget_message(result: AnalysisResult) -> "tuple[str, Optional[InlineKeyboardMarkup]]":
-    lines = [f"📊 <b>{_e(result.stats.title)}</b>", ""]
+    lines = [t("budget_result.title", title=_e(result.stats.title)), ""]
 
     cc = result.cross_check
     if cc is not None:
-        lines.append(_scenario_block(cc.optimistic_bound, cc.expected_count, cc.pessimistic_bound, cc.m, "Бюджетних місць"))
+        limit_label = t("budget_result.scenario_limit_label")
+        lines.append(_scenario_block(cc.optimistic_bound, cc.expected_count, cc.pessimistic_bound, cc.m, limit_label))
         lines.append("")
-        lines.append(f"<b>Висновок: {_e(cc.verdict)}</b>")
+        lines.append(t("budget_result.verdict", verdict=_e(cc.verdict)))
         lines.append(
-            f"Орієнтовний шанс: {cc.pessimistic_chance * 100:.0f}–{cc.chance * 100:.0f}–"
-            f"{cc.optimistic_chance * 100:.0f}% (від найгіршого до найкращого сценарію, не гарантія)"
+            t(
+                "budget_result.chance",
+                pessimistic=f"{cc.pessimistic_chance * 100:.0f}",
+                expected=f"{cc.chance * 100:.0f}",
+                optimistic=f"{cc.optimistic_chance * 100:.0f}",
+            )
         )
         if cc.unknown_count:
             lines.append("")
             lines.append(
-                f"❓ {cc.unknown_count} {_person_word(cc.unknown_count)} не вдалось перевірити напевно "
-                "(в іншої людини знайшлось таке саме ім'я, або сайт не відповів) — чесний невідомий "
-                "залишок, не врахований у жодну сторону."
+                t("budget_result.unknown_note", count=cc.unknown_count, word=_person_word(cc.unknown_count))
             )
     else:
         v = result.verdict
-        lines.append(f"Місце в списку: {v.optimistic_bound}–{v.pessimistic_bound}-те — бюджетних місць {v.m}")
-        lines.append(f"<b>Висновок: {_e(v.verdict)}</b>")
+        lines.append(
+            t("budget_result.no_v2_place", optimistic=v.optimistic_bound, pessimistic=v.pessimistic_bound, limit=v.m)
+        )
+        lines.append(t("budget_result.verdict", verdict=_e(v.verdict)))
 
     for w in result.warnings:
-        lines.append(f"⚠ {_e(w)}")
+        lines.append(t("budget_result.warning_line", warning=_e(w)))
 
     row1 = []
     if cc is not None and cc.assessments:
-        row1.append(InlineKeyboardButton("📋 Хто саме вище мене", callback_data="details"))
+        row1.append(InlineKeyboardButton(t("budget_result.button_details"), callback_data="details"))
     if result.stats.k is not None:
-        row1.append(InlineKeyboardButton("💳 Шанс на контракт", callback_data="contract"))
+        row1.append(InlineKeyboardButton(t("budget_result.button_contract"), callback_data="contract"))
     else:
         lines.append("")
-        lines.append("(шанс на контракт недоступний — сайт не показує кількість контрактних місць для цього напряму)")
+        lines.append(t("budget_result.contract_unavailable_note"))
 
     rows = [row1] if row1 else []
     if cc is not None:
-        rows.append([InlineKeyboardButton("🔔 Стежити (раз на 12 год)", callback_data="track")])
+        rows.append([InlineKeyboardButton(t("budget_result.button_track"), callback_data="track")])
 
     keyboard = InlineKeyboardMarkup(rows) if rows else None
     return "\n".join(lines), keyboard
@@ -373,65 +327,90 @@ def _format_budget_message(result: AnalysisResult) -> "tuple[str, Optional[Inlin
 def _format_details_text(result: AnalysisResult) -> str:
     cc = result.cross_check
     if cc is None or not cc.assessments:
-        return "Деталей немає."
-    lines = ["<b>Хто з абітурієнтів вище твого балу і що з ними ймовірно буде:</b>", ""]
+        return t("details.none")
+    lines = [t("details.header"), ""]
     for a in cc.assessments:
         applicant = a.competitor.applicant
         target = ""
         if a.best_choice:
             bc = a.best_choice
-            target = f"\n   → на пріоритетнішому виборі: {_e(bc.university)} / {_e(bc.specialty)} (там {bc.position}-те місце)"
+            target = t(
+                "details.target",
+                university=_e(bc.university),
+                specialty=_e(bc.specialty),
+                position=bc.position,
+            )
         lines.append(
-            f"• <b>{_e(applicant.name)}</b> — бал {applicant.score}, тут пріоритет {applicant.priority}\n"
-            f"   {_e(_explain_status(a.status))}{target}"
+            t(
+                "details.row",
+                name=_e(applicant.name),
+                score=applicant.score,
+                priority=applicant.priority,
+                status=_e(_explain_status(a.status)),
+                target=target,
+            )
         )
     return "\n".join(lines)
 
 
 def _format_contract_message(cr: ContractResult) -> "tuple[str, Optional[InlineKeyboardMarkup]]":
+    limit_label = t("contract_result.scenario_limit_label")
     lines = [
-        "💳 <b>Шанс на контракт</b>",
+        t("contract_result.title"),
         "",
-        _scenario_block(cr.optimistic_bound, cr.expected_count, cr.pessimistic_bound, cr.k, "Контрактних місць"),
+        _scenario_block(cr.optimistic_bound, cr.expected_count, cr.pessimistic_bound, cr.k, limit_label),
         "",
-        f"<b>Висновок: {_e(cr.verdict)}</b>",
-        f"Орієнтовний шанс: {cr.pessimistic_chance * 100:.0f}–{cr.chance * 100:.0f}–"
-        f"{cr.optimistic_chance * 100:.0f}% (від найгіршого до найкращого сценарію, не гарантія)",
+        t("contract_result.verdict", verdict=_e(cr.verdict)),
+        t(
+            "contract_result.chance",
+            pessimistic=f"{cr.pessimistic_chance * 100:.0f}",
+            expected=f"{cr.chance * 100:.0f}",
+            optimistic=f"{cr.optimistic_chance * 100:.0f}",
+        ),
     ]
     if cr.unknown_count:
         lines.append("")
         lines.append(
-            f"❓ {cr.unknown_count} {_person_word(cr.unknown_count)} не вдалось перевірити напевно "
-            "(в іншої людини знайшлось таке саме ім'я, або сайт не відповів) — чесний невідомий "
-            "залишок, не врахований у жодну сторону."
+            t("contract_result.unknown_note", count=cr.unknown_count, word=_person_word(cr.unknown_count))
         )
 
     keyboard = None
     if cr.assessments:
         keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("📋 Хто саме вище мене (контракт)", callback_data="contract_details")]]
+            [[InlineKeyboardButton(t("contract_result.button_details"), callback_data="contract_details")]]
         )
     return "\n".join(lines), keyboard
 
 
 def _format_contract_details_text(cr: ContractResult) -> str:
     if not cr.assessments:
-        return "Деталей немає."
-    lines = ["<b>Хто в контрактному пулі вище твого балу:</b>", ""]
+        return t("contract_details.none")
+    lines = [t("contract_details.header"), ""]
     for a in cr.assessments:
         applicant = a.member.applicant
         origin = (
-            "має тут окрему заявку на контракт"
+            t("contract_details.origin_contract")
             if a.member.origin == "контракт"
-            else "заявка на бюджет тут не пройшла, автоматично в контракті"
+            else t("contract_details.origin_budget_fail")
         )
         target = ""
         if a.best_choice:
             bc = a.best_choice
-            target = f"\n   → на пріоритетнішому виборі: {_e(bc.university)} / {_e(bc.specialty)} (там {bc.position}-те місце)"
+            target = t(
+                "contract_details.target",
+                university=_e(bc.university),
+                specialty=_e(bc.specialty),
+                position=bc.position,
+            )
         lines.append(
-            f"• <b>{_e(applicant.name)}</b> — бал {applicant.score} ({_e(origin)})\n"
-            f"   {_e(_explain_status(a.status))}{target}"
+            t(
+                "contract_details.row",
+                name=_e(applicant.name),
+                score=applicant.score,
+                origin=_e(origin),
+                status=_e(_explain_status(a.status)),
+                target=target,
+            )
         )
     return "\n".join(lines)
 
@@ -448,8 +427,8 @@ def _snapshot_from_cc(cc) -> dict:
 
 def _schedule_tracking(job_queue, chat_id: int) -> None:
     _unschedule_tracking(job_queue, chat_id)
-    for i, t in enumerate(_track_times_for_chat(chat_id)):
-        job_queue.run_daily(periodic_check, time=t, chat_id=chat_id, name=f"track-{chat_id}-{i}", data=chat_id)
+    for i, tt in enumerate(_track_times_for_chat(chat_id)):
+        job_queue.run_daily(periodic_check, time=tt, chat_id=chat_id, name=f"track-{chat_id}-{i}", data=chat_id)
 
 
 def _unschedule_tracking(job_queue, chat_id: int) -> None:
@@ -463,7 +442,7 @@ async def on_track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     result = _last_result.get(chat_id)
     if result is None or result.cross_check is None:
-        await query.message.reply_text("Спочатку зроби аналіз — нема за чим стежити.")
+        await query.message.reply_text(t("track.no_result"))
         return
 
     sub = {
@@ -476,21 +455,18 @@ async def on_track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     bot_storage.set_subscription(chat_id, sub)
     _schedule_tracking(context.job_queue, chat_id)
 
-    times = ", ".join(t.strftime("%H:%M") for t in _track_times_for_chat(chat_id))
-    await query.message.reply_text(
-        f"🔔 Стежу за цим напрямом. Перевірятиму щодня о {times} і напишу, якщо щось зміниться "
-        "(а якщо ні — просто щось зажартую, щоб ти знав, що я живий).\n/untrack — зупинити."
-    )
+    times = ", ".join(tt.strftime("%H:%M") for tt in _track_times_for_chat(chat_id))
+    await query.message.reply_text(t("track.subscribed", times=times))
 
 
 async def untrack_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     if bot_storage.get_subscription(chat_id) is None:
-        await update.message.reply_text("Я й так за тобою не стежу.")
+        await update.message.reply_text(t("track.not_subscribed"))
         return
     bot_storage.remove_subscription(chat_id)
     _unschedule_tracking(context.job_queue, chat_id)
-    await update.message.reply_text("Гаразд, більше не стежу. /start — почати новий аналіз.")
+    await update.message.reply_text(t("track.unsubscribed"))
 
 
 async def periodic_check(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -516,10 +492,10 @@ async def periodic_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     old_snapshot = sub.get("snapshot")
 
     if old_snapshot is not None and old_snapshot == new_snapshot:
-        text = random.choice(JOKES_NOTHING_CHANGED)
+        text = random.choice(t_list("track.nothing_changed"))
     else:
         budget_text, _ = _format_budget_message(result)
-        text = "🔔 <b>Дещо змінилось!</b>\n\n" + budget_text
+        text = t("track.update_prefix") + budget_text
 
     sub["snapshot"] = new_snapshot
     bot_storage.set_subscription(chat_id, sub)
@@ -564,7 +540,7 @@ async def on_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     chat_id = update.effective_chat.id
     result = _last_result.get(chat_id)
     if result is None:
-        await query.message.reply_text("Немає збереженого аналізу — напиши /start.")
+        await query.message.reply_text(t("errors.no_saved_analysis"))
         return
     for chunk in _chunk_text(_format_details_text(result)):
         await query.message.reply_text(chunk, parse_mode=ParseMode.HTML)
@@ -576,13 +552,13 @@ async def on_contract(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chat_id = update.effective_chat.id
     result = _last_result.get(chat_id)
     if result is None:
-        await query.message.reply_text("Немає збереженого аналізу — напиши /start.")
+        await query.message.reply_text(t("errors.no_saved_analysis"))
         return
     if chat_id in _active_chats:
-        await query.message.reply_text("Вже рахую попередній запит для тебе — зачекай.")
+        await query.message.reply_text(t("contract_result.already_running"))
         return
 
-    status_msg = await query.message.reply_text("Рахую шанс на контракт… (до ~1 хв)")
+    status_msg = await query.message.reply_text(t("contract_result.starting"))
     _active_chats.add(chat_id)
 
     loop = asyncio.get_running_loop()
@@ -593,16 +569,17 @@ async def on_contract(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if now - last_edit[0] < 3.0 and done != total:
             return
         last_edit[0] = now
-        _run_in_loop_and_wait(_safe_edit(status_msg, f"Рахую контракт… {done}/{total}: {_e(name)}"), loop)
+        text = t("contract_result.progress", done=done, total=total, name=_e(name))
+        _run_in_loop_and_wait(_safe_edit(status_msg, text), loop)
 
     try:
         cr = await asyncio.to_thread(run_contract_chance, result, on_progress=on_progress)
     except AnalysisError as e:
-        await _safe_edit(status_msg, f"Помилка: {_e(e)}")
+        await _safe_edit(status_msg, t("analysis.error", error=_e(e)))
         return
     except Exception as e:
         logger.exception("run_contract_chance впав")
-        await _safe_edit(status_msg, f"Неочікувана помилка: {_e(e)}")
+        await _safe_edit(status_msg, t("analysis.unexpected_error", error=_e(e)))
         return
     finally:
         _active_chats.discard(chat_id)
@@ -618,7 +595,7 @@ async def on_contract_details(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id = update.effective_chat.id
     cr = _last_contract.get(chat_id)
     if cr is None:
-        await query.message.reply_text("Немає збереженого розрахунку контракту.")
+        await query.message.reply_text(t("contract_details.no_result"))
         return
     for chunk in _chunk_text(_format_contract_details_text(cr)):
         await query.message.reply_text(chunk, parse_mode=ParseMode.HTML)
@@ -632,10 +609,10 @@ async def _post_init(application: Application) -> None:
     # Меню команд біля поля вводу в Telegram — щоб не вписувати /start руками.
     await application.bot.set_my_commands(
         [
-            BotCommand("start", "Почати новий аналіз"),
-            BotCommand("help", "Що це і як користуватись"),
-            BotCommand("cancel", "Скасувати поточний діалог"),
-            BotCommand("untrack", "Зупинити стеження"),
+            BotCommand("start", t("commands.start")),
+            BotCommand("help", t("commands.help")),
+            BotCommand("cancel", t("commands.cancel")),
+            BotCommand("untrack", t("commands.untrack")),
         ]
     )
 
@@ -652,9 +629,7 @@ async def _post_init(application: Application) -> None:
 
 def main() -> None:
     if not BOT_TOKEN:
-        raise SystemExit(
-            "TELEGRAM_ABIT_BOT_TOKEN не встановлено. Створи .env (див. .env.example) з токеном від @BotFather."
-        )
+        raise SystemExit(t("startup.missing_token"))
 
     # concurrent_updates=True — без цього PTB обробляє оновлення послідовно по
     # всьому боту: довгий аналіз одного юзера заблокував би повідомлення інших.

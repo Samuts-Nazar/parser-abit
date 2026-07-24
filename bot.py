@@ -492,7 +492,7 @@ async def periodic_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     old_snapshot = sub.get("snapshot")
 
     if old_snapshot is not None and old_snapshot == new_snapshot:
-        text = random.choice(t_list("track.nothing_changed"))
+        text = random.choice(t_list("track.jokes.nothing_changed"))
     else:
         budget_text, _ = _format_budget_message(result)
         text = t("track.update_prefix") + budget_text

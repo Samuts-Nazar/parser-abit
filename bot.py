@@ -344,6 +344,8 @@ def _format_budget_message(result: AnalysisResult) -> "tuple[str, Optional[Inlin
     if cc is not None:
         rows.append([InlineKeyboardButton(t("budget_result.button_track"), callback_data="track")])
         rows.append([InlineKeyboardButton(t("chain.button_start"), callback_data="chain")])
+        
+        rows.append([InlineKeyboardButton(t("pick.button_start"), callback_data="pick_start")])
 
     keyboard = InlineKeyboardMarkup(rows) if rows else None
     return "\n".join(lines), keyboard

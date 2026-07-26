@@ -158,7 +158,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     return await _ask_url(update, context)
 
-
+async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data.clear()
+    return await _ask_url(update, context)
+    
 async def check_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.message.text.strip() == ACCESS_CODE:
         _verified_chats.add(update.effective_chat.id)
@@ -169,7 +174,7 @@ async def check_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def _ask_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(t("pick.button_start"), callback_data="pick_start")]])
-    await update.message.reply_text(t("greeting.welcome"), reply_markup=keyboard)
+    await update.effective_message.reply_text(t("greeting.welcome"), reply_markup=keyboard)
     return ASK_URL
 
 
@@ -344,9 +349,9 @@ def _format_budget_message(result: AnalysisResult) -> "tuple[str, Optional[Inlin
     if cc is not None:
         rows.append([InlineKeyboardButton(t("budget_result.button_track"), callback_data="track")])
         rows.append([InlineKeyboardButton(t("chain.button_start"), callback_data="chain")])
-        
         rows.append([InlineKeyboardButton(t("pick.button_start"), callback_data="pick_start")])
-
+        
+    rows.append([InlineKeyboardButton(t("budget_result.button_restart"), callback_data="restart")])
     keyboard = InlineKeyboardMarkup(rows) if rows else None
     return "\n".join(lines), keyboard
 
@@ -1023,7 +1028,10 @@ def main() -> None:
     )
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            CommandHandler("start", start),
+            CallbackQueryHandler(restart, pattern="^restart$"),
+        ],
         states={
             CHECK_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, check_code)],
             ASK_URL: [
